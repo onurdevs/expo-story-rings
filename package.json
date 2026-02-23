@@ -1,6 +1,6 @@
 {
   "name": "expo-story-rings",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Instagram-style story rings and fullscreen viewer for React Native & Expo",
   "main": "src/index.tsx",
   "types": "src/index.tsx",

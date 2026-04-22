@@ -7,6 +7,8 @@ Instagram-style story rings and full-screen viewer for React Native and Expo.
 - **Story rings** — Horizontal list of avatar rings with labels
 - **Full-screen viewer** — Modal with progress bar and safe area
 - **Navigation** — Tap left/right for previous/next; close button and Android back
+- **Interactive Gestures** — Long press to pause, swipe down to close
+- **Media Support** — High performance cached images (via `expo-image`) and video support (via `expo-av`)
 - **Auto-advance** — Configurable duration per story
 - **Callbacks** — `onStoryOpen` and `onStoryClose`
 - **Customization** — Ring color, duration, and container styles
@@ -14,7 +16,7 @@ Instagram-style story rings and full-screen viewer for React Native and Expo.
 ## Install
 
 ```bash
-npm install expo-story-rings react-native-safe-area-context
+npm install expo-story-rings react-native-safe-area-context expo-image expo-av
 ```
 
 Your app root must be wrapped in `SafeAreaProvider` from `react-native-safe-area-context` (Expo templates usually include this).
@@ -62,7 +64,9 @@ export default function Screen() {
 type StoryItem = {
   id: string | number;
   name: string;
-  image: string;  // Image URI (HTTPS recommended)
+  image?: string; // Legacy/fallback Image URI
+  url?: string; // Media URI (HTTPS recommended)
+  type?: 'image' | 'video'; // defaults to image
 };
 ```
 
@@ -70,12 +74,14 @@ type StoryItem = {
 
 - **Android** — Hardware back button closes the story viewer.
 - **Both** — Full-screen size follows `useWindowDimensions()`, so rotation and multi-window work correctly.
-- **Images** — Prefer HTTPS. For HTTP on Android you may need cleartext traffic configured in your app.
+- **Images/Videos** — Prefer HTTPS. For HTTP on Android you may need cleartext traffic configured in your app.
 
 ## Requirements
 
 - React Native 0.70+
 - `react-native-safe-area-context` 4.0+
+- `expo-image` 1.0+
+- `expo-av` 13.0+
 
 ## License
 

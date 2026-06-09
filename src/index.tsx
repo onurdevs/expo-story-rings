@@ -1,2 +1,2 @@
 export { default as Stories } from './Stories';
-export type { StoryItem, StoriesProps } from './Stories';
+export type { StoryCTA, StoryItem, StoriesProps } from './types';

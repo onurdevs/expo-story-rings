@@ -1,18 +1,28 @@
 {
   "name": "expo-story-rings",
-  "version": "1.0.3",
-  "description": "Instagram-style story rings and fullscreen viewer for React Native & Expo",
-  "main": "src/index.tsx",
-  "types": "src/index.tsx",
+  "version": "2.0.0",
+  "description": "Brand and organization story rings with fullscreen viewer for React Native & Expo",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "react-native": "src/index.tsx",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
   "scripts": {
-    "prepare": "echo 'No build step - source is shipped for Metro'"
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "react-native",
     "expo",
     "stories",
-    "instagram-stories",
     "story-rings",
+    "brand-stories",
+    "organization-stories",
     "expo-stories"
   ],
   "author": "Onur Er (https://onurer.com.tr)",
@@ -35,6 +45,7 @@
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-native": "^0.72.8",
+    "tsup": "^8.5.0",
     "typescript": "^5.9.3"
   }
 }

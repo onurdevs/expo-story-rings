@@ -1,71 +1,211 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+    Animated,
     BackHandler,
     FlatList,
+    Linking,
     Modal,
+    PanResponder,
     Platform,
     Pressable,
     StyleSheet,
     Text,
     View,
-    ViewStyle,
     useWindowDimensions,
-    PanResponder,
-    Animated,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
-import { Video, ResizeMode } from 'expo-av';
+import { Video, ResizeMode, AVPlaybackStatus } from 'expo-av';
 
-export type StoryItem = {
-    id: string | number;
-    name: string;
-    image?: string;
-    url?: string; // fallback or new standard
-    type?: 'image' | 'video';
-};
+import StoryProgressBar from './StoryProgressBar';
+import type { StoriesProps, StoryItem } from './types';
+import {
+    filterActiveStories,
+    getMediaUri,
+    getStoryDurationMs,
+    getThumbnailUri,
+    isStorySeen,
+} from './utils';
 
-export type StoriesProps = {
-    stories: StoryItem[];
-    storyDurationMs?: number;
-    ringColor?: string;
-    contentContainerStyle?: ViewStyle;
-    style?: ViewStyle;
-    onStoryOpen?: (story: StoryItem, index: number) => void;
-    onStoryClose?: () => void;
-};
+export type { StoryCTA, StoryItem, StoriesProps } from './types';
 
 const DEFAULT_DURATION_MS = 5000;
 const TICK_MS = 50;
+const DEFAULT_RING_SIZE = 70;
+const DEFAULT_RING_COLOR = '#E1306C';
+const DEFAULT_RING_COLOR_SEEN = '#999999';
+const DEFAULT_LABEL_COLOR = '#333333';
+const DEFAULT_PROGRESS_COLOR = '#FFFFFF';
 
 const Stories: React.FC<StoriesProps> = ({
     stories,
     storyDurationMs = DEFAULT_DURATION_MS,
-    ringColor = '#E1306C',
+    ringColor = DEFAULT_RING_COLOR,
+    ringColorSeen = DEFAULT_RING_COLOR_SEEN,
+    labelColor = DEFAULT_LABEL_COLOR,
+    progressColor = DEFAULT_PROGRESS_COLOR,
+    ringSize = DEFAULT_RING_SIZE,
+    headerTitle,
+    seenIds,
     contentContainerStyle,
     style,
     onStoryOpen,
     onStoryClose,
+    onStoryView,
+    onStoryComplete,
+    onAllStoriesComplete,
+    onSeenIdsChange,
+    renderStoryOverlay,
 }) => {
     const insets = useSafeAreaInsets();
     const { width, height } = useWindowDimensions();
+    const activeStories = useMemo(() => filterActiveStories(stories), [stories]);
+
     const [selectedStory, setSelectedStory] = useState<StoryItem | null>(null);
     const [progress, setProgress] = useState(0);
     const [fullscreenImageError, setFullscreenImageError] = useState(false);
     const [failedThumbnails, setFailedThumbnails] = useState<Set<string | number>>(new Set());
     const [isPaused, setIsPaused] = useState(false);
     const panY = useRef(new Animated.Value(0)).current;
+    const viewedStoryRef = useRef<string | number | null>(null);
+    const isCompletingRef = useRef(false);
 
     const onStoryCloseRef = useRef(onStoryClose);
-    onStoryCloseRef.current = onStoryClose;
+    const onStoryViewRef = useRef(onStoryView);
+    const onStoryCompleteRef = useRef(onStoryComplete);
+    const onAllStoriesCompleteRef = useRef(onAllStoriesComplete);
+    const onSeenIdsChangeRef = useRef(onSeenIdsChange);
 
-    const tickStep = TICK_MS / storyDurationMs;
+    onStoryCloseRef.current = onStoryClose;
+    onStoryViewRef.current = onStoryView;
+    onStoryCompleteRef.current = onStoryComplete;
+    onAllStoriesCompleteRef.current = onAllStoriesComplete;
+    onSeenIdsChangeRef.current = onSeenIdsChange;
+
+    const currentIndex = selectedStory
+        ? activeStories.findIndex((story) => story.id === selectedStory.id)
+        : -1;
+
+    const currentDurationMs =
+        selectedStory && currentIndex >= 0
+            ? getStoryDurationMs(selectedStory, storyDurationMs)
+            : storyDurationMs;
+
+    const isVideoStory = selectedStory?.type === 'video';
+    const tickStep = TICK_MS / currentDurationMs;
+
+    const ringStyles = useMemo(() => {
+        const radius = ringSize / 2;
+        const innerRadius = radius - 3;
+        return {
+            itemContainer: {
+                width: ringSize,
+                height: ringSize,
+                borderRadius: radius,
+            },
+            item: {
+                borderRadius: innerRadius,
+            },
+            nameText: {
+                maxWidth: ringSize + 6,
+            },
+        };
+    }, [ringSize]);
+
+    const markSeen = useCallback(
+        (story: StoryItem) => {
+            if (isStorySeen(story, seenIds)) return;
+            onSeenIdsChangeRef.current?.([...(seenIds ?? []), story.id]);
+        },
+        [seenIds]
+    );
+
+    const completeCurrentStory = useCallback(() => {
+        if (!selectedStory || currentIndex < 0 || isCompletingRef.current) return;
+
+        isCompletingRef.current = true;
+        onStoryCompleteRef.current?.(selectedStory, currentIndex);
+
+        const nextItem = activeStories[currentIndex + 1];
+        if (nextItem) {
+            setSelectedStory(nextItem);
+            setProgress(0);
+            return;
+        }
+
+        setSelectedStory(null);
+        onAllStoriesCompleteRef.current?.();
+        onStoryCloseRef.current?.();
+    }, [activeStories, currentIndex, selectedStory]);
+
+    const closeStory = useCallback(() => {
+        setSelectedStory(null);
+        onStoryCloseRef.current?.();
+    }, []);
+
+    const goToPrev = useCallback(() => {
+        if (currentIndex <= 0) return;
+        setSelectedStory(activeStories[currentIndex - 1]);
+    }, [activeStories, currentIndex]);
+
+    const goToNext = useCallback(() => {
+        if (!selectedStory || currentIndex < 0) return;
+
+        onStoryCompleteRef.current?.(selectedStory, currentIndex);
+
+        if (currentIndex >= activeStories.length - 1) {
+            setSelectedStory(null);
+            onAllStoriesCompleteRef.current?.();
+            onStoryCloseRef.current?.();
+            return;
+        }
+
+        setSelectedStory(activeStories[currentIndex + 1]);
+    }, [activeStories, currentIndex, selectedStory]);
+
+    const openStory = useCallback(
+        (story: StoryItem) => {
+            const index = activeStories.findIndex((item) => item.id === story.id);
+            setSelectedStory(story);
+            onStoryOpen?.(story, index);
+        },
+        [activeStories, onStoryOpen]
+    );
+
+    const handleCtaPress = useCallback(async (story: StoryItem) => {
+        if (!story.cta) return;
+
+        if (story.cta.onPress) {
+            story.cta.onPress();
+            return;
+        }
+
+        if (story.cta.url) {
+            const canOpen = await Linking.canOpenURL(story.cta.url);
+            if (canOpen) {
+                await Linking.openURL(story.cta.url);
+            }
+        }
+    }, []);
+
+    const handleVideoPlaybackUpdate = useCallback(
+        (status: AVPlaybackStatus) => {
+            if (!status.isLoaded || !selectedStory) return;
+
+            if (status.durationMillis && status.durationMillis > 0) {
+                setProgress(status.positionMillis / status.durationMillis);
+            }
+
+            if (status.didJustFinish && !status.isLooping) {
+                completeCurrentStory();
+            }
+        },
+        [completeCurrentStory, selectedStory]
+    );
 
     const panResponder = useRef(
         PanResponder.create({
-            onMoveShouldSetPanResponder: (_, gestureState) => {
-                return gestureState.dy > 20;
-            },
+            onMoveShouldSetPanResponder: (_, gestureState) => gestureState.dy > 20,
             onPanResponderMove: (_, gestureState) => {
                 if (gestureState.dy > 0) {
                     panY.setValue(gestureState.dy);
@@ -85,141 +225,159 @@ const Stories: React.FC<StoriesProps> = ({
     ).current;
 
     useEffect(() => {
-        if (!selectedStory) return;
+        if (!selectedStory) {
+            viewedStoryRef.current = null;
+            isCompletingRef.current = false;
+            return;
+        }
+
+        isCompletingRef.current = false;
         panY.setValue(0);
         setProgress(0);
         setFullscreenImageError(false);
         setIsPaused(false);
-    }, [selectedStory]);
+    }, [selectedStory, panY]);
 
     useEffect(() => {
-        if (!selectedStory || isPaused) return;
+        if (!selectedStory || viewedStoryRef.current === selectedStory.id) return;
+
+        viewedStoryRef.current = selectedStory.id;
+        const index = activeStories.findIndex((story) => story.id === selectedStory.id);
+        onStoryViewRef.current?.(selectedStory, index);
+        markSeen(selectedStory);
+    }, [activeStories, markSeen, selectedStory]);
+
+    useEffect(() => {
+        if (!selectedStory || isPaused || isVideoStory) return;
 
         const interval = setInterval(() => {
             setProgress((prev) => {
-                if (prev >= 1) {
-                    const currentIndex = stories.findIndex((s) => s.id === selectedStory.id);
-                    const nextItem = stories[currentIndex + 1];
-                    if (nextItem) {
-                        setSelectedStory(nextItem);
-                        return 0;
-                    }
-                    setSelectedStory(null);
-                    onStoryCloseRef.current?.();
-                    return 1;
-                }
-                return prev + tickStep;
+                if (prev >= 1) return 1;
+                const next = prev + tickStep;
+                return next >= 1 ? 1 : next;
             });
         }, TICK_MS);
+
         return () => clearInterval(interval);
-    }, [selectedStory, tickStep, stories, isPaused]);
+    }, [isPaused, isVideoStory, selectedStory, tickStep]);
 
-    const currentIndex = selectedStory ? stories.findIndex((s) => s.id === selectedStory.id) : -1;
-
-    const goToPrev = () => {
-        if (currentIndex <= 0) return;
-        setSelectedStory(stories[currentIndex - 1]);
-    };
-
-    const goToNext = () => {
-        if (currentIndex >= stories.length - 1) {
-            setSelectedStory(null);
-            onStoryCloseRef.current?.();
-            return;
-        }
-        setSelectedStory(stories[currentIndex + 1]);
-    };
-
-    const openStory = (story: StoryItem) => {
-        setSelectedStory(story);
-        onStoryOpen?.(story, stories.findIndex((s) => s.id === story.id));
-    };
-    const closeStory = () => {
-        setSelectedStory(null);
-        onStoryCloseRef.current?.();
-    };
+    useEffect(() => {
+        if (!selectedStory || isPaused || isVideoStory || progress < 1) return;
+        completeCurrentStory();
+    }, [completeCurrentStory, isPaused, isVideoStory, progress, selectedStory]);
 
     useEffect(() => {
         if (!selectedStory || Platform.OS !== 'android') return;
+
         const onBack = () => {
             closeStory();
             return true;
         };
+
         const sub = BackHandler.addEventListener('hardwareBackPress', onBack);
         return () => sub.remove();
-    }, [selectedStory]);
+    }, [closeStory, selectedStory]);
 
     const markThumbnailFailed = (id: string | number) => {
         setFailedThumbnails((prev) => new Set(prev).add(id));
     };
 
-    if (!stories.length) return null;
+    if (!activeStories.length) return null;
+
+    const mediaUri = selectedStory ? getMediaUri(selectedStory) : undefined;
 
     return (
         <View style={[styles.mainContainer, style]}>
             <FlatList
-                data={stories}
+                data={activeStories}
                 keyExtractor={(item) => String(item.id)}
                 horizontal
                 showsHorizontalScrollIndicator={false}
                 contentContainerStyle={[styles.listContent, contentContainerStyle]}
-                renderItem={({ item }) => (
-                    <Pressable
-                        onPress={() => openStory(item)}
-                        style={styles.wrapper}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Open story ${item.name}`}
-                    >
-                        <View style={[styles.itemContainer, { borderColor: ringColor }]}>
-                            {failedThumbnails.has(item.id) ? (
-                                <View style={[styles.item, styles.thumbnailPlaceholder]}>
-                                    <Text style={styles.thumbnailPlaceholderText}>?</Text>
-                                </View>
-                            ) : (
-                                <Image
-                                    source={item.url || item.image}
-                                    style={styles.item}
-                                    onError={() => markThumbnailFailed(item.id)}
-                                />
-                            )}
-                        </View>
-                        <Text style={styles.nameText} numberOfLines={1}>
-                            {item.name}
-                        </Text>
-                    </Pressable>
-                )}
+                renderItem={({ item }) => {
+                    const thumbnailUri = getThumbnailUri(item);
+                    const seen = isStorySeen(item, seenIds);
+
+                    return (
+                        <Pressable
+                            onPress={() => openStory(item)}
+                            style={styles.wrapper}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Open story ${item.name}`}
+                        >
+                            <View
+                                style={[
+                                    styles.itemContainer,
+                                    ringStyles.itemContainer,
+                                    { borderColor: seen ? ringColorSeen : ringColor },
+                                ]}
+                            >
+                                {failedThumbnails.has(item.id) || !thumbnailUri ? (
+                                    <View
+                                        style={[
+                                            styles.item,
+                                            ringStyles.item,
+                                            styles.thumbnailPlaceholder,
+                                        ]}
+                                    >
+                                        <Text style={styles.thumbnailPlaceholderText}>?</Text>
+                                    </View>
+                                ) : (
+                                    <Image
+                                        source={thumbnailUri}
+                                        style={[styles.item, ringStyles.item]}
+                                        onError={() => markThumbnailFailed(item.id)}
+                                    />
+                                )}
+                            </View>
+                            <Text
+                                style={[styles.nameText, ringStyles.nameText, { color: labelColor }]}
+                                numberOfLines={1}
+                            >
+                                {item.name}
+                            </Text>
+                        </Pressable>
+                    );
+                }}
             />
 
             <Modal
                 visible={!!selectedStory}
                 transparent
                 animationType="fade"
-                accessibilityLabel={selectedStory ? `Story viewer: ${selectedStory.name}` : undefined}
+                accessibilityLabel={
+                    selectedStory ? `Story viewer: ${selectedStory.name}` : undefined
+                }
             >
-                <Animated.View style={[styles.modalContainer, { transform: [{ translateY: panY }] }]} {...panResponder.panHandlers}>
+                <Animated.View
+                    style={[styles.modalContainer, { transform: [{ translateY: panY }] }]}
+                    {...panResponder.panHandlers}
+                >
                     <View style={[styles.topBar, { paddingTop: insets.top + 12 }]}>
-                        <View
-                            style={styles.progressBarBackground}
-                            accessibilityLabel="Story progress"
-                            // iOS accessibilityValue prefers integer values; using percent avoids
-                            // 'Loss of precision during arithmetic conversion' crash on long long
-                            accessibilityValue={{
-                                now: Math.round(progress * 100),
-                                min: 0,
-                                max: 100,
-                            }}
-                        >
-                            <View style={[styles.progressBarFill, { width: `${progress * 100}%` }]} />
+                        <View style={styles.topBarContent}>
+                            {headerTitle ? (
+                                <Text style={styles.headerTitle} numberOfLines={1}>
+                                    {headerTitle}
+                                </Text>
+                            ) : null}
+                            <View style={styles.progressRow}>
+                                <StoryProgressBar
+                                    count={activeStories.length}
+                                    currentIndex={Math.max(currentIndex, 0)}
+                                    progress={progress}
+                                    progressColor={progressColor}
+                                />
+                                <Pressable
+                                    style={styles.closeButton}
+                                    onPress={closeStory}
+                                    hitSlop={12}
+                                    accessibilityRole="button"
+                                    accessibilityLabel="Close story"
+                                >
+                                    <Text style={styles.closeButtonText}>×</Text>
+                                </Pressable>
+                            </View>
                         </View>
-                        <Pressable
-                            style={styles.closeButton}
-                            onPress={closeStory}
-                            hitSlop={12}
-                            accessibilityRole="button"
-                            accessibilityLabel="Close story"
-                        >
-                            <Text style={styles.closeButtonText}>×</Text>
-                        </Pressable>
                     </View>
 
                     <View style={styles.navTouchArea}>
@@ -242,7 +400,7 @@ const Stories: React.FC<StoriesProps> = ({
                     </View>
 
                     {selectedStory &&
-                        (fullscreenImageError ? (
+                        (fullscreenImageError || !mediaUri ? (
                             <View style={[styles.fullImagePlaceholder, { width, height }]}>
                                 <Text style={styles.fullImagePlaceholderText}>
                                     Couldn't load media
@@ -250,21 +408,37 @@ const Stories: React.FC<StoriesProps> = ({
                             </View>
                         ) : selectedStory.type === 'video' ? (
                             <Video
-                                source={{ uri: (selectedStory.url || selectedStory.image) as string }}
+                                source={{ uri: mediaUri }}
                                 style={[styles.fullImage, { width, height }]}
                                 resizeMode={ResizeMode.COVER}
                                 shouldPlay={!isPaused}
-                                isLooping
+                                isLooping={false}
+                                onPlaybackStatusUpdate={handleVideoPlaybackUpdate}
                                 onError={() => setFullscreenImageError(true)}
                             />
                         ) : (
                             <Image
-                                source={selectedStory.url || selectedStory.image}
+                                source={mediaUri}
                                 style={[styles.fullImage, { width, height }]}
                                 contentFit="cover"
                                 onError={() => setFullscreenImageError(true)}
                             />
                         ))}
+
+                    {selectedStory && renderStoryOverlay?.(selectedStory, Math.max(currentIndex, 0))}
+
+                    {selectedStory?.cta ? (
+                        <View style={[styles.ctaContainer, { paddingBottom: insets.bottom + 16 }]}>
+                            <Pressable
+                                style={[styles.ctaButton, { backgroundColor: ringColor }]}
+                                onPress={() => handleCtaPress(selectedStory)}
+                                accessibilityRole="button"
+                                accessibilityLabel={selectedStory.cta.label}
+                            >
+                                <Text style={styles.ctaButtonText}>{selectedStory.cta.label}</Text>
+                            </Pressable>
+                        </View>
+                    ) : null}
                 </Animated.View>
             </Modal>
         </View>
@@ -276,20 +450,17 @@ const styles = StyleSheet.create({
     listContent: { paddingLeft: 15 },
     wrapper: { alignItems: 'center', marginRight: 15 },
     itemContainer: {
-        width: 70,
-        height: 70,
         padding: 3,
-        borderRadius: 35,
         borderWidth: 2,
     },
-    item: { width: '100%', height: '100%', borderRadius: 35 },
+    item: { width: '100%', height: '100%' },
     thumbnailPlaceholder: {
         backgroundColor: 'rgba(255,255,255,0.2)',
         justifyContent: 'center',
         alignItems: 'center',
     },
     thumbnailPlaceholderText: { color: 'rgba(255,255,255,0.6)', fontSize: 24 },
-    nameText: { fontSize: 11, marginTop: 4, textAlign: 'center', maxWidth: 76 },
+    nameText: { fontSize: 11, marginTop: 4, textAlign: 'center' },
 
     modalContainer: {
         flex: 1,
@@ -310,20 +481,22 @@ const styles = StyleSheet.create({
         left: 0,
         right: 0,
         zIndex: 10,
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 12,
         paddingHorizontal: 16,
         paddingBottom: 14,
     },
-    progressBarBackground: {
-        flex: 1,
-        height: 4,
-        backgroundColor: 'rgba(255,255,255,0.35)',
-        borderRadius: 2,
-        overflow: 'hidden',
+    topBarContent: {
+        gap: 8,
     },
-    progressBarFill: { height: '100%', backgroundColor: 'white', borderRadius: 2 },
+    headerTitle: {
+        color: 'white',
+        fontSize: 14,
+        fontWeight: '600',
+    },
+    progressRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+    },
     closeButton: { padding: 4, zIndex: 11 },
     closeButtonText: { fontSize: 32, color: 'white', lineHeight: 36, fontWeight: '300' },
     navTouchArea: {
@@ -337,6 +510,23 @@ const styles = StyleSheet.create({
     },
     navLeft: { flex: 1 },
     navRight: { flex: 1 },
+    ctaContainer: {
+        position: 'absolute',
+        left: 16,
+        right: 16,
+        bottom: 0,
+        zIndex: 12,
+    },
+    ctaButton: {
+        borderRadius: 8,
+        paddingVertical: 14,
+        alignItems: 'center',
+    },
+    ctaButtonText: {
+        color: 'white',
+        fontSize: 16,
+        fontWeight: '600',
+    },
 });
 
 export default Stories;

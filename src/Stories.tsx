@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
     BackHandler,
     FlatList,
-    Image,
     Modal,
     Platform,
     Pressable,
@@ -11,13 +10,19 @@ import {
     View,
     ViewStyle,
     useWindowDimensions,
+    PanResponder,
+    Animated,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Image } from 'expo-image';
+import { Video, ResizeMode } from 'expo-av';
 
 export type StoryItem = {
     id: string | number;
     name: string;
-    image: string;
+    image?: string;
+    url?: string; // fallback or new standard
+    type?: 'image' | 'video';
 };
 
 export type StoriesProps = {
@@ -48,15 +53,48 @@ const Stories: React.FC<StoriesProps> = ({
     const [progress, setProgress] = useState(0);
     const [fullscreenImageError, setFullscreenImageError] = useState(false);
     const [failedThumbnails, setFailedThumbnails] = useState<Set<string | number>>(new Set());
+    const [isPaused, setIsPaused] = useState(false);
+    const panY = useRef(new Animated.Value(0)).current;
+
     const onStoryCloseRef = useRef(onStoryClose);
     onStoryCloseRef.current = onStoryClose;
 
     const tickStep = TICK_MS / storyDurationMs;
 
+    const panResponder = useRef(
+        PanResponder.create({
+            onMoveShouldSetPanResponder: (_, gestureState) => {
+                return gestureState.dy > 20;
+            },
+            onPanResponderMove: (_, gestureState) => {
+                if (gestureState.dy > 0) {
+                    panY.setValue(gestureState.dy);
+                }
+            },
+            onPanResponderRelease: (_, gestureState) => {
+                if (gestureState.dy > 100) {
+                    closeStory();
+                } else {
+                    Animated.spring(panY, {
+                        toValue: 0,
+                        useNativeDriver: true,
+                    }).start();
+                }
+            },
+        })
+    ).current;
+
     useEffect(() => {
         if (!selectedStory) return;
+        panY.setValue(0);
         setProgress(0);
         setFullscreenImageError(false);
+        setIsPaused(false);
+    }, [selectedStory]);
+
+    useEffect(() => {
+        if (!selectedStory || isPaused) return;
+
         const interval = setInterval(() => {
             setProgress((prev) => {
                 if (prev >= 1) {
@@ -74,7 +112,7 @@ const Stories: React.FC<StoriesProps> = ({
             });
         }, TICK_MS);
         return () => clearInterval(interval);
-    }, [selectedStory, tickStep, stories]);
+    }, [selectedStory, tickStep, stories, isPaused]);
 
     const currentIndex = selectedStory ? stories.findIndex((s) => s.id === selectedStory.id) : -1;
 
@@ -107,8 +145,8 @@ const Stories: React.FC<StoriesProps> = ({
             closeStory();
             return true;
         };
-        BackHandler.addEventListener('hardwareBackPress', onBack);
-        return () => BackHandler.removeEventListener('hardwareBackPress', onBack);
+        const sub = BackHandler.addEventListener('hardwareBackPress', onBack);
+        return () => sub.remove();
     }, [selectedStory]);
 
     const markThumbnailFailed = (id: string | number) => {
@@ -139,7 +177,7 @@ const Stories: React.FC<StoriesProps> = ({
                                 </View>
                             ) : (
                                 <Image
-                                    source={{ uri: item.image }}
+                                    source={item.url || item.image}
                                     style={styles.item}
                                     onError={() => markThumbnailFailed(item.id)}
                                 />
@@ -158,7 +196,7 @@ const Stories: React.FC<StoriesProps> = ({
                 animationType="fade"
                 accessibilityLabel={selectedStory ? `Story viewer: ${selectedStory.name}` : undefined}
             >
-                <View style={styles.modalContainer}>
+                <Animated.View style={[styles.modalContainer, { transform: [{ translateY: panY }] }]} {...panResponder.panHandlers}>
                     <View style={[styles.topBar, { paddingTop: insets.top + 12 }]}>
                         <View
                             style={styles.progressBarBackground}
@@ -188,12 +226,16 @@ const Stories: React.FC<StoriesProps> = ({
                         <Pressable
                             style={styles.navLeft}
                             onPress={goToPrev}
+                            onPressIn={() => setIsPaused(true)}
+                            onPressOut={() => setIsPaused(false)}
                             accessibilityRole="button"
                             accessibilityLabel="Previous story"
                         />
                         <Pressable
                             style={styles.navRight}
                             onPress={goToNext}
+                            onPressIn={() => setIsPaused(true)}
+                            onPressOut={() => setIsPaused(false)}
                             accessibilityRole="button"
                             accessibilityLabel="Next story"
                         />
@@ -203,18 +245,27 @@ const Stories: React.FC<StoriesProps> = ({
                         (fullscreenImageError ? (
                             <View style={[styles.fullImagePlaceholder, { width, height }]}>
                                 <Text style={styles.fullImagePlaceholderText}>
-                                    Couldn't load image
+                                    Couldn't load media
                                 </Text>
                             </View>
+                        ) : selectedStory.type === 'video' ? (
+                            <Video
+                                source={{ uri: (selectedStory.url || selectedStory.image) as string }}
+                                style={[styles.fullImage, { width, height }]}
+                                resizeMode={ResizeMode.COVER}
+                                shouldPlay={!isPaused}
+                                isLooping
+                                onError={() => setFullscreenImageError(true)}
+                            />
                         ) : (
                             <Image
-                                source={{ uri: selectedStory.image }}
+                                source={selectedStory.url || selectedStory.image}
                                 style={[styles.fullImage, { width, height }]}
-                                resizeMode="cover"
+                                contentFit="cover"
                                 onError={() => setFullscreenImageError(true)}
                             />
                         ))}
-                </View>
+                </Animated.View>
             </Modal>
         </View>
     );
@@ -276,7 +327,11 @@ const styles = StyleSheet.create({
     closeButton: { padding: 4, zIndex: 11 },
     closeButtonText: { fontSize: 32, color: 'white', lineHeight: 36, fontWeight: '300' },
     navTouchArea: {
-        ...StyleSheet.absoluteFillObject,
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
         flexDirection: 'row',
         zIndex: 5,
     },
